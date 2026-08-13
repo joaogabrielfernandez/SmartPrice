@@ -145,13 +145,19 @@ else:
 tipos_disp = sorted(d_cid.tipo_pt.unique())
 tipos_sel = st.sidebar.multiselect("Tipo de imóvel", tipos_disp, default=tipos_disp)
 
-q_max = int(min(d_cid.quartos.max(), 6))
+# sliders com guarda: st.slider quebra se min == max, o que acontece em
+# cidade pequena ou filtro muito estreito
+q_max = max(int(min(d_cid.quartos.max(), 6)), 1)
 quartos_sel = st.sidebar.slider("Quartos", 0, q_max, (0, q_max))
 
 a_lo, a_hi = int(d_cid.area.quantile(.01)), int(d_cid.area.quantile(.99))
+if a_hi <= a_lo:
+    a_lo, a_hi = int(d_cid.area.min()), int(d_cid.area.max())
+if a_hi <= a_lo:
+    a_hi = a_lo + 1
 area_sel = st.sidebar.slider("Área útil (m²)", a_lo, a_hi, (a_lo, a_hi))
 
-p_hi = int(d_cid.preco.quantile(.99))
+p_hi = max(int(d_cid.preco.quantile(.99)), 100)
 preco_sel = st.sidebar.slider("Faixa de aluguel (R$)", 0, p_hi, (0, p_hi), step=100)
 
 f = d_cid[
@@ -299,12 +305,15 @@ with tab_pan:
         st.plotly_chart(fig, width="stretch")
 
         fq = f[f.quartos <= 5]
-        fig = px.box(fq, x='quartos', y='preco', points=False,
-                     title="Distribuição do aluguel por número de quartos",
-                     labels={'quartos': 'Quartos', 'preco': 'R$'})
-        fig.update_traces(marker_color='#4682b4')
-        fig.update_yaxes(range=[0, fq.preco.quantile(.97)])
-        st.plotly_chart(fig, width="stretch")
+        if len(fq):
+            fig = px.box(fq, x='quartos', y='preco', points=False,
+                         title="Distribuição do aluguel por número de quartos",
+                         labels={'quartos': 'Quartos', 'preco': 'R$'})
+            fig.update_traces(marker_color='#4682b4')
+            fig.update_yaxes(range=[0, fq.preco.quantile(.97)])
+            st.plotly_chart(fig, width="stretch")
+        else:
+            st.info("Sem imóveis de até 5 quartos no filtro atual.")
 
     with g2:
         min_amostra = 30 if modo_brasil else 10
@@ -346,38 +355,85 @@ with tab_pan:
 
 # ------------------------------------------------------------------- mapa
 with tab_mapa:
-    titulo_mapa = "Preço médio por cidade — Brasil" if modo_brasil else f"Preço médio por bairro — {cidade_sel}"
-    st.subheader(titulo_mapa)
-    metrica = st.radio("Métrica exibida", ["R$ por m²", "Aluguel mediano"],
-                       horizontal=True, label_visibility="collapsed")
-    min_amostra_mapa = 20 if modo_brasil else 5
+    st.subheader(f"Mapa — {local_label}")
 
-    mp = f.dropna(subset=['lat', 'lon']).groupby(nivel_col).agg(
-        anuncios=('preco', 'size'), aluguel_mediano=('preco', 'median'),
-        rs_m2=('rs_m2', 'median'), lat=('lat', 'median'), lon=('lon', 'median')).reset_index()
-    mp = mp[mp.anuncios >= min_amostra_mapa]
+    ctrl1, ctrl2 = st.columns([1, 1])
+    with ctrl1:
+        visao = st.radio("Visualização",
+                         ["Anúncios individuais", "Agregado por região"],
+                         horizontal=True)
+    with ctrl2:
+        metrica = st.radio("Métrica exibida", ["R$ por m²", "Aluguel mediano"],
+                           horizontal=True)
 
-    if len(mp) == 0:
-        st.info("Sem coordenadas suficientes no filtro atual.")
-    else:
-        col = 'rs_m2' if metrica == "R$ por m²" else 'aluguel_mediano'
+    col = 'rs_m2' if metrica == "R$ por m²" else 'preco'
+    geo = f.dropna(subset=['lat', 'lon'])
+
+    if len(geo) == 0:
+        st.info("Sem coordenadas no filtro atual.")
+    elif visao == "Anúncios individuais":
+        # cada ponto e um anuncio: da pra dar zoom em qualquer cidade e ver o estoque real
+        MAX_PTS = 20000
+        amostrado = len(geo) > MAX_PTS
+        gplot = geo.sample(MAX_PTS, random_state=1) if amostrado else geo
+
+        # escala de cor cortada no p95 pra um outlier caro nao achatar o resto
+        cmax = float(gplot[col].quantile(.95))
+        cmin = float(gplot[col].quantile(.05))
+
+        centro = ({'lat': -14.2, 'lon': -51.9} if modo_brasil
+                  else {'lat': float(geo.lat.median()), 'lon': float(geo.lon.median())})
+
         fig = px.scatter_map(
-            mp, lat='lat', lon='lon', color=col, size='anuncios',
-            hover_name=nivel_col,
-            hover_data={'anuncios': True, 'aluguel_mediano': ':.0f', 'rs_m2': ':.1f',
-                        'lat': False, 'lon': False},
-            color_continuous_scale='RdYlGn_r', size_max=35,
-            zoom=3 if modo_brasil else 10, center={'lat': -14.2, 'lon': -51.9} if modo_brasil else None,
-            map_style='carto-positron', height=600,
-            labels={'rs_m2': 'R$/m²', 'aluguel_mediano': 'Aluguel mediano', 'anuncios': 'Anúncios'})
+            gplot, lat='lat', lon='lon', color=col,
+            hover_name='bairro',
+            hover_data={'cidade': True, 'tipo_pt': True, 'preco': ':.0f', 'area': ':.0f',
+                        'quartos': True, 'rs_m2': ':.1f', 'lat': False, 'lon': False},
+            color_continuous_scale='RdYlGn_r', range_color=[cmin, cmax],
+            zoom=3.2 if modo_brasil else 10, center=centro,
+            map_style='carto-positron', height=650, opacity=.6,
+            labels={'rs_m2': 'R$/m²', 'preco': 'Aluguel', 'area': 'Área (m²)',
+                    'tipo_pt': 'Tipo', 'cidade': 'Cidade', 'quartos': 'Quartos'})
+        fig.update_traces(marker=dict(size=7))
         fig.update_layout(margin=dict(l=0, r=0, t=0, b=0))
         st.plotly_chart(fig, width="stretch")
-        legenda_unidade = "cidade" if modo_brasil else "bairro"
-        st.caption(f"Cada bolha é uma {legenda_unidade}: o tamanho representa o volume de anúncios "
-                   f"e a cor a métrica escolhida. {legenda_unidade.capitalize()}s com menos de "
-                   f"{min_amostra_mapa} anúncios ficam fora.")
-        if modo_brasil:
-            st.caption("Escolha uma cidade específica na barra lateral para ver o detalhe por bairro.")
+
+        legenda = (f"{fmt_num(len(gplot), 0)} anúncios plotados individualmente — "
+                   "dê zoom em qualquer região para ver o estoque local. "
+                   "A cor segue a métrica escolhida, com a escala cortada nos percentis 5 e 95 "
+                   "para um imóvel de luxo isolado não achatar o resto.")
+        if amostrado:
+            legenda += (f" Exibindo uma amostra de {fmt_num(MAX_PTS, 0)} de "
+                        f"{fmt_num(len(geo), 0)} anúncios, por desempenho do navegador.")
+        st.caption(legenda)
+    else:
+        min_amostra_mapa = 20 if modo_brasil else 5
+        mp = geo.groupby(nivel_col).agg(
+            anuncios=('preco', 'size'), aluguel_mediano=('preco', 'median'),
+            rs_m2=('rs_m2', 'median'), lat=('lat', 'median'), lon=('lon', 'median')).reset_index()
+        mp = mp[mp.anuncios >= min_amostra_mapa]
+
+        if len(mp) == 0:
+            st.info(f"Nenhum {nivel_nome} com pelo menos {min_amostra_mapa} anúncios no filtro atual.")
+        else:
+            col_ag = 'rs_m2' if metrica == "R$ por m²" else 'aluguel_mediano'
+            centro = ({'lat': -14.2, 'lon': -51.9} if modo_brasil
+                      else {'lat': float(mp.lat.median()), 'lon': float(mp.lon.median())})
+            fig = px.scatter_map(
+                mp, lat='lat', lon='lon', color=col_ag, size='anuncios',
+                hover_name=nivel_col,
+                hover_data={'anuncios': True, 'aluguel_mediano': ':.0f', 'rs_m2': ':.1f',
+                            'lat': False, 'lon': False},
+                color_continuous_scale='RdYlGn_r', size_max=35,
+                zoom=3.2 if modo_brasil else 10, center=centro,
+                map_style='carto-positron', height=650,
+                labels={'rs_m2': 'R$/m²', 'aluguel_mediano': 'Aluguel mediano',
+                        'anuncios': 'Anúncios'})
+            fig.update_layout(margin=dict(l=0, r=0, t=0, b=0))
+            st.plotly_chart(fig, width="stretch")
+            st.caption(f"Cada bolha é {'uma cidade' if modo_brasil else 'um bairro'}: o tamanho "
+                       f"representa o volume de anúncios e a cor a métrica escolhida. "
+                       f"{nivel_nome.capitalize()}s com menos de {min_amostra_mapa} anúncios ficam fora.")
 
 
 # ------------------------------------------------------------ sobre o modelo
