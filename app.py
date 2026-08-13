@@ -21,6 +21,24 @@ TIPOS_PT = {
 pt = lambda t: TIPOS_PT.get(t, str(t).replace('_', ' ').title())
 
 
+def fmt_num(v, casas=1):
+    """numero pt-BR: ponto de milhar, virgula decimal"""
+    s = f"{v:,.{casas}f}"
+    return s.replace(',', '§').replace('.', ',').replace('§', '.')
+
+
+def fmt_moeda(v, casas=0):
+    """R$ pt-BR pra usar em st.metric (nao renderiza markdown, cifrao normal)"""
+    return f"R$ {fmt_num(v, casas)}"
+
+
+def fmt_moeda_md(v, casas=0):
+    """R$ pt-BR pra usar dentro de st.markdown/st.caption/st.info.
+    Cifrao escapado com \\$ porque essas funcoes tratam $texto$ como LaTeX
+    e comem o simbolo (era a causa do 'R716· R/m2' que sumia o R$)."""
+    return f"R\\$ {fmt_num(v, casas)}"
+
+
 # --------------------------------------------------------------- carregamento
 @st.cache_resource(show_spinner=False)
 def carregar_modelo():
@@ -108,13 +126,21 @@ def prever(cidade, bairro, tipo, area, quartos, banheiros, suites, vagas,
 st.sidebar.title("🏠 Smart Price")
 st.sidebar.caption("Precificação de aluguel residencial baseada em 21,6 mil anúncios reais")
 
+CIDADE_TODAS = "🌎 Todas as cidades (Brasil)"
 cidades = sorted(DADOS.cidade.unique())
-cidade_sel = st.sidebar.selectbox("Cidade", cidades,
-                                  index=cidades.index('São Paulo') if 'São Paulo' in cidades else 0)
+opcoes_cidade = [CIDADE_TODAS] + cidades
+idx_default = opcoes_cidade.index('São Paulo') if 'São Paulo' in opcoes_cidade else 0
+cidade_sel = st.sidebar.selectbox("Cidade", opcoes_cidade, index=idx_default)
+modo_brasil = cidade_sel == CIDADE_TODAS
 
-d_cid = DADOS[DADOS.cidade == cidade_sel]
-bairros_disp = sorted(d_cid.bairro.value_counts()[lambda s: s >= 5].index)
-bairros_sel = st.sidebar.multiselect("Bairro (vazio = todos)", bairros_disp)
+d_cid = DADOS if modo_brasil else DADOS[DADOS.cidade == cidade_sel]
+
+bairros_sel = []
+if not modo_brasil:
+    bairros_disp = sorted(d_cid.bairro.value_counts()[lambda s: s >= 5].index)
+    bairros_sel = st.sidebar.multiselect("Bairro (vazio = todos)", bairros_disp)
+else:
+    st.sidebar.caption("Filtro de bairro fica disponível ao escolher uma cidade específica.")
 
 tipos_disp = sorted(d_cid.tipo_pt.unique())
 tipos_sel = st.sidebar.multiselect("Tipo de imóvel", tipos_disp, default=tipos_disp)
@@ -138,8 +164,14 @@ if bairros_sel:
     f = f[f.bairro.isin(bairros_sel)]
 
 st.sidebar.divider()
-st.sidebar.metric("Anúncios no filtro", f"{len(f):,}".replace(',', '.'))
+st.sidebar.metric("Anúncios no filtro", fmt_num(len(f), 0))
 st.sidebar.caption(f"Modelo: LightGBM · MAPE {MET['MAPE_%']:.1f}% · R² {MET['R2']:.2f}")
+
+# label amigavel usado nos titulos das abas
+local_label = "Brasil (todas as cidades)" if modo_brasil else cidade_sel
+# nivel de agregacao: no Brasil inteiro comparamos por cidade, numa cidade especifica por bairro
+nivel_col = 'cidade' if modo_brasil else 'bairro'
+nivel_nome = 'cidade' if modo_brasil else 'bairro'
 
 
 # ---------------------------------------------------------------------- topo
@@ -151,13 +183,14 @@ if len(f) == 0:
     st.stop()
 
 c1, c2, c3, c4 = st.columns(4)
-c1.metric("Aluguel mediano", f"R$ {f.preco.median():,.0f}".replace(',', '.'))
-c2.metric("R$ por m²", f"R$ {(f.preco / f.area).median():,.1f}".replace(',', '.'))
-c3.metric("Área mediana", f"{f.area.median():,.0f} m²".replace(',', '.'))
-c4.metric("Bairros cobertos", f"{f.bairro.nunique():,}".replace(',', '.'))
+c1.metric("Aluguel mediano", fmt_moeda(f.preco.median()))
+c2.metric("R$ por m²", fmt_moeda((f.preco / f.area).median(), casas=1))
+c3.metric("Área mediana", f"{fmt_num(f.area.median(), 0)} m²")
+c4.metric("Cidades cobertas" if modo_brasil else "Bairros cobertos",
+          fmt_num(f.cidade.nunique() if modo_brasil else f.bairro.nunique(), 0))
 
 tab_sim, tab_pan, tab_mapa, tab_mod = st.tabs(
-    ["🎯 Simulador de aluguel", "📊 Panorama do mercado", "🗺️ Mapa por bairro", "🤖 Sobre o modelo"])
+    ["🎯 Simulador de aluguel", "📊 Panorama do mercado", "🗺️ Mapa", "🤖 Sobre o modelo"])
 
 
 # ------------------------------------------------------------- simulador
@@ -208,15 +241,14 @@ with tab_sim:
 
         st.divider()
         r1, r2, r3 = st.columns(3)
-        r1.metric("Aluguel sugerido", f"R$ {valor:,.0f}".replace(',', '.'))
-        r2.metric("Faixa de negociação", f"R$ {lo:,.0f} – {hi:,.0f}".replace(',', '.'))
+        r1.metric("Aluguel sugerido", fmt_moeda(valor))
+        r2.metric("Faixa de negociação", f"{fmt_moeda(lo)} – {fmt_moeda(hi)}")
         r3.metric("Custo total ao inquilino",
-                  f"R$ {valor + condo_us:,.0f}".replace(',', '.'),
+                  fmt_moeda(valor + condo_us),
                   help="Aluguel previsto + condomínio (informado ou estimado pelo bairro).")
 
         st.caption(f"Condomínio {'informado' if sabe_condo else 'estimado'}: "
-                   f"R$ {condo_us:,.0f} · R$/m² previsto: R$ {valor / area_in:,.1f}"
-                   .replace(',', '.'))
+                   f"{fmt_moeda_md(condo_us)} · R\\$/m² previsto: {fmt_moeda_md(valor / area_in, 1)}")
 
         # comparacao com o bairro
         ref = REF[(REF.cidade == cid_in) & (REF.bairro == bai_in)]
@@ -225,11 +257,12 @@ with tab_sim:
             med = ref.aluguel_mediano.iloc[0]
             delta = (valor / med - 1) * 100
             st.info(
-                f"**{bai_in}** tem aluguel mediano de R$ {med:,.0f} e R$ {ref.rs_m2.iloc[0]:,.1f}/m² "
+                f"**{bai_in}** tem aluguel mediano de {fmt_moeda_md(med)} e "
+                f"{fmt_moeda_md(ref.rs_m2.iloc[0], 1)}/m² "
                 f"({int(ref.anuncios.iloc[0])} anúncios). A sugestão está "
                 f"{abs(delta):.0f}% {'acima' if delta > 0 else 'abaixo'} da mediana do bairro — "
                 "a mediana mistura todos os tamanhos, então a diferença é esperada quando o imóvel "
-                "simulado foge do padrão local.".replace(',', '.'))
+                "simulado foge do padrão local.")
 
             fig = px.histogram(comp, x="preco", nbins=40,
                                title=f"Onde a sugestão cai dentro de {bai_in}",
@@ -251,7 +284,7 @@ with tab_sim:
 
 # --------------------------------------------------------------- panorama
 with tab_pan:
-    st.subheader(f"Mercado de aluguel — {cidade_sel}")
+    st.subheader(f"Mercado de aluguel — {local_label}")
 
     g1, g2 = st.columns(2)
     with g1:
@@ -273,22 +306,25 @@ with tab_pan:
         st.plotly_chart(fig, width="stretch")
 
     with g2:
-        b = f.groupby('bairro').agg(
+        min_amostra = 30 if modo_brasil else 10
+        b = f.groupby(nivel_col).agg(
             anuncios=('preco', 'size'), rs_m2=('rs_m2', 'median'),
             mediana=('preco', 'median')).reset_index()
-        b = b[b.anuncios >= 10].sort_values('rs_m2')
+        b = b[b.anuncios >= min_amostra].sort_values('rs_m2')
         if len(b) >= 4:
-            extremos = pd.concat([b.head(7), b.tail(7)]).drop_duplicates('bairro')
-            fig = px.bar(extremos, x='rs_m2', y='bairro', orientation='h',
-                         title="Bairros mais baratos e mais caros por m² (mín. 10 anúncios)",
-                         labels={'rs_m2': 'R$/m²', 'bairro': ''}, text_auto='.1f',
+            extremos = pd.concat([b.head(7), b.tail(7)]).drop_duplicates(nivel_col)
+            fig = px.bar(extremos, x='rs_m2', y=nivel_col, orientation='h',
+                         title=f"{nivel_nome.capitalize()}s mais baratos e mais caros por m² "
+                               f"(mín. {min_amostra} anúncios)",
+                         labels={'rs_m2': 'R$/m²', nivel_col: ''}, text_auto='.1f',
                          color='rs_m2', color_continuous_scale='RdYlGn_r')
             fig.update_layout(coloraxis_showscale=False)
             st.plotly_chart(fig, width="stretch")
-            st.caption(f"Amplitude dentro de {cidade_sel}: "
-                       f"**{b.rs_m2.max() / b.rs_m2.min():.1f}x** entre o bairro mais caro e o mais barato por m².")
+            st.caption(f"Amplitude dentro de {local_label}: "
+                       f"**{fmt_num(b.rs_m2.max() / b.rs_m2.min())}x** entre o {nivel_nome} "
+                       f"mais caro e o mais barato por m².")
         else:
-            st.info("Poucos bairros com amostra suficiente no filtro atual.")
+            st.info(f"Poucos {nivel_nome}s com amostra suficiente no filtro atual.")
 
         fig = px.scatter(f.sample(min(3000, len(f)), random_state=1),
                          x='area', y='preco', color='tipo_pt', opacity=.5,
@@ -298,8 +334,9 @@ with tab_pan:
         fig.update_yaxes(range=[0, f.preco.quantile(.97)])
         st.plotly_chart(fig, width="stretch")
 
-    st.markdown("##### Ranking de bairros")
-    tabela = f.groupby('bairro').agg(
+    st.markdown("##### Ranking de bairros" + (" (todas as cidades)" if modo_brasil else ""))
+    cols_tabela = ['cidade', 'bairro'] if modo_brasil else ['bairro']
+    tabela = f.groupby(cols_tabela).agg(
         anúncios=('preco', 'size'), aluguel_mediano=('preco', 'median'),
         rs_m2=('rs_m2', 'median'), área_mediana=('area', 'median')).reset_index()
     tabela = tabela[tabela['anúncios'] >= 5].sort_values('aluguel_mediano', ascending=False)
@@ -308,14 +345,16 @@ with tab_pan:
 
 # ------------------------------------------------------------------- mapa
 with tab_mapa:
-    st.subheader(f"Preço médio por bairro — {cidade_sel}")
+    titulo_mapa = "Preço médio por cidade — Brasil" if modo_brasil else f"Preço médio por bairro — {cidade_sel}"
+    st.subheader(titulo_mapa)
     metrica = st.radio("Métrica exibida", ["R$ por m²", "Aluguel mediano"],
                        horizontal=True, label_visibility="collapsed")
+    min_amostra_mapa = 20 if modo_brasil else 5
 
-    mp = f.dropna(subset=['lat', 'lon']).groupby('bairro').agg(
+    mp = f.dropna(subset=['lat', 'lon']).groupby(nivel_col).agg(
         anuncios=('preco', 'size'), aluguel_mediano=('preco', 'median'),
         rs_m2=('rs_m2', 'median'), lat=('lat', 'median'), lon=('lon', 'median')).reset_index()
-    mp = mp[mp.anuncios >= 5]
+    mp = mp[mp.anuncios >= min_amostra_mapa]
 
     if len(mp) == 0:
         st.info("Sem coordenadas suficientes no filtro atual.")
@@ -323,16 +362,21 @@ with tab_mapa:
         col = 'rs_m2' if metrica == "R$ por m²" else 'aluguel_mediano'
         fig = px.scatter_map(
             mp, lat='lat', lon='lon', color=col, size='anuncios',
-            hover_name='bairro',
+            hover_name=nivel_col,
             hover_data={'anuncios': True, 'aluguel_mediano': ':.0f', 'rs_m2': ':.1f',
                         'lat': False, 'lon': False},
-            color_continuous_scale='RdYlGn_r', size_max=35, zoom=10,
+            color_continuous_scale='RdYlGn_r', size_max=35,
+            zoom=3 if modo_brasil else 10, center={'lat': -14.2, 'lon': -51.9} if modo_brasil else None,
             map_style='carto-positron', height=600,
             labels={'rs_m2': 'R$/m²', 'aluguel_mediano': 'Aluguel mediano', 'anuncios': 'Anúncios'})
         fig.update_layout(margin=dict(l=0, r=0, t=0, b=0))
         st.plotly_chart(fig, width="stretch")
-        st.caption("Cada bolha é um bairro: o tamanho representa o volume de anúncios e a cor a "
-                   "métrica escolhida. Bairros com menos de 5 anúncios ficam fora.")
+        legenda_unidade = "cidade" if modo_brasil else "bairro"
+        st.caption(f"Cada bolha é uma {legenda_unidade}: o tamanho representa o volume de anúncios "
+                   f"e a cor a métrica escolhida. {legenda_unidade.capitalize()}s com menos de "
+                   f"{min_amostra_mapa} anúncios ficam fora.")
+        if modo_brasil:
+            st.caption("Escolha uma cidade específica na barra lateral para ver o detalhe por bairro.")
 
 
 # ------------------------------------------------------------ sobre o modelo
@@ -340,22 +384,22 @@ with tab_mod:
     st.subheader("Como a estimativa é calculada")
 
     m1, m2, m3, m4 = st.columns(4)
-    m1.metric("MAE", f"R$ {MET['MAE']:,.0f}".replace(',', '.'), help="Erro absoluto médio em reais")
-    m2.metric("MAPE", f"{MET['MAPE_%']:.1f}%", help="Erro percentual médio")
-    m3.metric("RMSE", f"R$ {MET['RMSE']:,.0f}".replace(',', '.'), help="Penaliza erros grandes")
-    m4.metric("R²", f"{MET['R2']:.3f}", help="Variação do preço explicada pelo modelo")
+    m1.metric("MAE", fmt_moeda(MET['MAE']), help="Erro absoluto médio em reais")
+    m2.metric("MAPE", f"{fmt_num(MET['MAPE_%'], 1)}%", help="Erro percentual médio")
+    m3.metric("RMSE", fmt_moeda(MET['RMSE']), help="Penaliza erros grandes")
+    m4.metric("R²", fmt_num(MET['R2'], 3), help="Variação do preço explicada pelo modelo")
 
     p1, p2, p3 = st.columns(3)
     p1.metric("Previsões dentro de ±10%", f"{MET['dentro_10']:.0f}%")
     p2.metric("Dentro de ±20%", f"{MET['dentro_20']:.0f}%")
     p3.metric("Dentro de ±30%", f"{MET['dentro_30']:.0f}%")
 
-    st.markdown("""
+    st.markdown(f"""
 **Modelo.** LightGBM treinado no log do aluguel, escolhido em comparação com Regressão Linear,
 Árvore de Decisão, Random Forest e XGBoost no mesmo split. O boosting empatou com o XGBoost dentro
 do ruído e a escolha foi pelo RMSE menor (erra menos nos imóveis caros) e pelo peso menor no deploy.
-A regressão linear foi descartada por extrapolar previsões de R$ 1,7 milhão — inaceitável num
-produto de precificação.
+A regressão linear foi descartada por extrapolar previsões de {fmt_moeda_md(1700000)} — inaceitável
+num produto de precificação.
 
 **Base.** 35,7 mil anúncios do ZAP Imóveis viraram 21,6 mil modeláveis: a sentinela `normal` virou
 nulo, o separador de milhar foi corrigido antes de qualquer conta, 11,5 mil republicações do mesmo
@@ -366,7 +410,7 @@ localização piora o MAPE em quase 5 pontos; remover condomínio e IPTU custa q
 simulador funciona bem mesmo sem você saber o condomínio.
 
 **Limites conhecidos.**
-- Acima de R$ 6 mil o modelo subestima em média, então a sugestão é **piso de negociação**.
+- Acima de {fmt_moeda_md(6000)} o modelo subestima em média, então a sugestão é **piso de negociação**.
 - Cobertura é o tipo menos previsível; flat é o mais previsível.
 - A base é de julho de 2020 e precisa de reajuste por índice antes de virar número de contrato.
 - Estado de conservação, andar, vista e idade do prédio não existem na base — dois apartamentos
